@@ -1,0 +1,1 @@
+cmd_/home/mote/Desktop/rootkit/rootkit/myrootkitko.o := ld -m elf_x86_64 -z max-page-size=0x200000   -r -o /home/mote/Desktop/rootkit/rootkit/myrootkitko.o /home/mote/Desktop/rootkit/rootkit/myrootkit.o /home/mote/Desktop/rootkit/rootkit/module_handler/module_handler.o /home/mote/Desktop/rootkit/rootkit/zeroevil/zeroevil.o 

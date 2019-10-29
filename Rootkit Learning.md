@@ -1,6 +1,6 @@
 # Rootkit Learning
 
-
+[TOC]
 
 
 
@@ -608,3 +608,34 @@ struct proc_dir_entry {
 ```
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt /* has to precede printk.h */
 ```
+
+
+
+ https://github.com/croemheld/lkm-rootkit/blob/master/src/module_hiding.c 
+
+
+
+## Zeroevil库的使用
+
+
+
+```
+unsigned long **
+get_sct(void);     //获取sys_call_table地址，调用get_sct_via_sys_close
+
+unsigned long **
+get_sct_via_sys_close(void);  //暴力搜索内存空间找到地址
+
+
+void
+disable_wp(void)     //关闭写保护，需要上锁
+
+void
+enable_wp(void)     //开启写保护，需要上锁
+
+
+
+void
+print_process_list(void)  //打印进程列表
+```
+
