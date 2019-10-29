@@ -155,7 +155,7 @@ struct module
         struct list_head list;  /作为一个全局链表的成员
         char name[MODULE_NAME_LEN];   //模块名字，一般以模块文件的文件名作为模块名
  
-        struct module_kobject mkobj;
+        struct module_kobject mkobj;  //组成设备模型的基本结构
         struct module_param_attrs *param_attrs;
         const char *version;
         const char *srcversion;
@@ -214,6 +214,140 @@ enum module_state
 struct list_head list
 
 >  list是作为一个列表的成员，所有的内核模块都被维护在一个全局链表中，链表头是一个全局变量struct module *modules。任何一个新创建的模块，都会被加入到这个链表的头部 
+
+**struct module_kobject mkobj**
+
+[参考](https://www.cnblogs.com/xiaojiang1025/p/6193959.html)
+
+[参考](http://kcmetercec.top/2018/03/09/linux_kernel_sysfs_tutorial/)
+
+[参考](https://www.twblogs.net/a/5b8b2ccf2b717718832dd8f0/zh-cn)
+
+```
+//include/linux/module.h
+
+struct module_kobject {
+	struct kobject kobj;
+	struct module *mod;
+	struct kobject *drivers_dir;
+	struct module_param_attrs *mp;
+	struct completion *kobj_completion;
+};
+
+//include/linux/kobject.h
+
+struct kobject {  
+    const char          *name;   //kobject对象的名字，对应sysfs下的一个目录
+    struct list_head    entry;   //kobject中插入的head_list结构
+    struct kobject      *parent;  //指向当前kobject父对象的指针，体现在sys结构中就是包含当前kobject对象的目录对象
+    struct kset         *kset;    //表示当前kobject对象所属的集合
+    struct kobj_type    *ktype;   //表示当前kobject的类型
+    struct kernfs_node  *sd;     //表示VFS文件系统的目录项
+    struct kref         kref;   // 对kobject的引用计数，当引用计数为0时，就回调之前注册的release方法释放该对象
+    #ifdef CONFIG_DEBUG_KOBJECT_RELEASE  
+    	struct delayed_work release;
+    #endif
+        unsigned int state_initialized:1;
+        unsigned int state_in_sysfs:1;
+        unsigned int state_add_uevent_sent:1;
+        unsigned int state_remove_uevent_sent:1;
+        unsigned int uevent_suppress:1;
+};
+```
+
+>  `kobject`是组成设备模型的基本结构。`sysfs`是基于 RAM 的文件系统，它提供了用于向用户空间展示内核空间里对象、属性和链接的方法。`sysfs`和`kobject`层次紧密相连，将`kobject`层次关系展示出来，让用户层能够看到。一般`sysfs`挂载在`/sys/`，所以`/sys/module`就是`sysfs`的一个目录层次，包含当前加载的模块信息。所以，我们使用`kobject_del()`删除我们的模块的`kobject`，就可以达到隐藏的目的。 
+
+kobject_del
+
+```
+//lib/kobject.c
+
+void kobject_del(struct kobject *kobj)
+{
+	struct kernfs_node *sd;
+
+	if (!kobj)
+		return;
+
+	sd = kobj->sd;       //获取kobj对象的文件系统目录项
+	sysfs_remove_dir(kobj); //调用sysfs_remove_dir实际上是把kobj的sd结构置为NULL
+	sysfs_put(sd);
+
+	kobj->state_in_sysfs = 0;
+	kobj_kset_leave(kobj);
+	kobject_put(kobj->parent);
+	kobj->parent = NULL;
+}
+```
+
+struct kernfs_node  *sd;
+
+```
+struct kernfs_node {
+	atomic_t		count;   //相关计数
+	atomic_t		active;  //相关计数
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	dep_map;
+#endif
+	struct kernfs_node	*parent;  //本节点的父节点，这个比较重要，属性是文件，父节点是kobject
+	const char		*name;     //节点名字
+
+	struct rb_node		rb;     //红黑树节点
+
+	const void		*ns;	//命名空间相关
+	unsigned int		hash;	//命名空间相关
+	//定义联合体
+	union {
+		struct kernfs_elem_dir		dir;     //目录
+		struct kernfs_elem_symlink	symlink;   //符号链接
+		struct kernfs_elem_attr		attr;    //属性
+	};
+
+	void			*priv;        //私有数据，kobject作为私有数据随kernfs_node传递
+
+	unsigned short		flags;    //文件相关属性
+	umode_t			mode;    //文件相关属性
+	unsigned int		ino;   //子设备号
+	struct kernfs_iattrs	*iattr;    //节点本身属性
+};
+
+```
+
+struct kernfs_elem_attr
+
+```
+struct kernfs_elem_attr {
+	const struct kernfs_ops	*ops;
+	struct kernfs_open_node	*open;
+	loff_t			size;
+	struct kernfs_node	*notify_next;	/* for kernfs_notify() */
+};
+```
+
+
+
+sysfs_remove_dir(kobj);
+
+```
+void sysfs_remove_dir(struct kobject *kobj)
+{
+	struct kernfs_node *kn = kobj->sd;
+	spin_lock(&sysfs_symlink_target_lock);
+	kobj->sd = NULL;
+	spin_unlock(&sysfs_symlink_target_lock);
+
+	if (kn) {
+		WARN_ON_ONCE(kernfs_type(kn) != KERNFS_DIR);
+		kernfs_remove(kn);
+	}
+}
+```
+
+**红黑树rbtree**
+
+[参考](https://biscuitos.github.io/blog/Tree_RBTREE_rb_set_parent_color/)
+
+
 
 
 
@@ -332,9 +466,97 @@ static inline void list_add_tail(struct list_head *new, struct list_head *head)
 
 调用list_del_init函数删除链表中的一个结点，并初始化被删除的结点（也就是使被删除的结点的prev和next都指向自己）；
 
+这两个函数也调用了相同的函数__list_del：
+
+```
+static inline void __list_del(struct list_head * prev, struct list_head * next)
+{
+    next->prev = prev;
+    prev->next = next;
+}
+```
+
+ 让prev结点和next结点互相指向 
+
+对于list_del：
+
+```
+static inline void list_del(struct list_head *entry)
+{
+    __list_del(entry->prev, entry->next);  //就是entry节点的前后节点绕过entry节点相互指向
+    entry->next = LIST_POISON1;            
+    entry->prev = LIST_POISON2;
+    //将entry结点的前后指针指向LIST_POISON1和LIST_POISON2，从而完成对entry结点的删除
+}
+```
+
+LIST_POISON1和LIST_POISON2指得是什么暂时不清楚，一般来说要把这个节点释放掉都是指向NULL
+
+对于list_del_init：
+
+```
+static inline void list_del_init(struct list_head *entry)
+{
+	__list_del(entry->prev, entry->next);
+	INIT_LIST_HEAD(entry);
+}
+```
+
+与list_del不同，list_del_init将entry结点删除后，还会对entry结点做初始化，使得entry结点的prev和next都指向自己。 
+
+- typeof、offsetof 和 container_of
+
+定义如下：
+
+```
+#include <stddef.h>
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE*)0)->MEMBER)
+
+#define container_of(ptr, type, member) ({          \
+        const typeof( ((type *)0)->member ) *__mptr = (const typeof( ((type *)0)->member ) *)(ptr); \
+        (type *)( (char *)__mptr - offsetof(type,member) );})
+```
+
+typeof是GNU对C新增得一个扩展关键字，用于获取对象类型，通常我们需要处理的对象都是指针，如果想知道指针所指向的对象的类型，可以使用typeof。
+
+offsetof返回结构体TYPE中MEMBER成员相对于结构体首地址的偏移量。为什么offsetof可以得到某个成员的偏移量？
+
+> `(TYPE *)0`,将 0 强制转换为`TYPE`型指针，记 `p = (TYPE *)0`，`p`是指向`TYPE`的指针，它的值是0。那么 `p->MEMBER` 就是 `MEMBER` 这个元素了，而`&(p->MEMBER)`就是`MEMBER`的地址，编译器认为0是一个有效的地址，则基地址为0，这样就巧妙的转化为了`TYPE`中的偏移量。再把结果强制转换为`size_t`型的就OK了。
+
+container_of的作用的通过结构体变量中的一个域成员变量的指针来获取指向整个结构体变量的指针
+
+>  创建一个类型为`const typeof( ((type *)0)->member ) *`，即类型为`type`结构的`member`域所对应的对象类型的常指针`__mptr` ，使用`ptr`初始化， 也就是获取到了member的地址。
+>
+>  因为数据结构是顺序存储的，此时如果知道`member`在`type`结构中的相对偏移，那么用`__mptr`减去此偏移便是`ptr`所属的`type`的地址。  
 
 
 
+- list_entry
+
+有了上面的基础就比较好理解，已知某个结构体abc的list对象地址（struct list_head *ptr），怎么获取到abc对象的地址呢，使用container_of宏！不过这里应该使用list_entry来做
+
+```
+#define list_entry(ptr, type, member)  container_of(ptr, type, member) ......
+```
+
+因此list_entry的作用就是获取某个成员对象所在的对象的地址。
+
+
+
+- list_for_each_entry
+
+```
+/**
+ * list_for_each_entry	-	iterate over list of given type
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_for_each_entry(pos, head, member)				\
+	for (pos = list_entry((head)->next, typeof(*pos), member);	\
+	     &pos->member != (head); 	\
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+```
 
 
 
