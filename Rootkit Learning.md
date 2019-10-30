@@ -82,6 +82,121 @@ module_exit(test_exit);
 
 上面的`alias`是 GCC 的拓展功能，给函数起别名并关联起来。所以最终被使用的还是`init_module/cleanup_module`这两个名字。
 
+
+
+### 编译过程
+
+noinj.c
+
+```
+# ifndef CPP
+# include <linux/module.h>
+# include <linux/kernel.h>
+# endif // CPP
+
+# include "zeroevil/zeroevil.h"
+
+
+MODULE_LICENSE("GPL");
+
+int
+noinj_init(void)
+{
+    fm_alert("noinj: %s\n", "Greetings the World!");
+
+    return 0;
+}
+
+void
+noinj_exit(void)
+{
+    fm_alert("noinj: %s\n", "Farewell the World!");
+
+    return;
+}
+
+module_init(noinj_init);
+module_exit(noinj_exit);
+
+int
+fake_init(void)
+{
+    noinj_init();
+
+    fm_alert("==> NOINJ: %s\n", "GR33TINGS THE W0RLD!");
+
+    return 0;
+}
+
+int
+fake_exit(void)
+{
+    noinj_exit();
+
+    fm_alert("==> NOINJ: %s\n", "FAR3W311 THE W0RLD!");
+
+    return 0;
+}
+```
+
+编译生成的noinj.ko文件是一个可重定位文件。
+
+- 根据`noinj.c`生成`noinj.o`
+- 编译器生成一个`noinj.mod.c`源文件
+- 根据`noinj.mod.c`生成`noinj.mod.o`
+- 将`noinj.o`与`noinj.mod.o`链接为`noinj.ko`
+
+我们看一下`noinj.mod.c`，比较有意思的是下面几行：
+
+```
+__visible struct module __this_module
+__attribute__((section(".gnu.linkonce.this_module"))) = { 
+    .name = KBUILD_MODNAME,
+    .init = init_module,
+#ifdef CONFIG_MODULE_UNLOAD
+    .exit = cleanup_module,
+#endif
+    .arch = MODULE_ARCH_INIT,
+};
+```
+
+`__this_module`即用来表示我们的模块的数据结构，它将被放在`.gnu.linkonce.this_module`节中。入口函数和出口函数都是默认的，其原因我们在**预备一**中已经解释过。
+
+如果我们把`init_module/cleanup_module`的值分别改为`fake_init/fake_exit`的值，则当模块加载进行符号解析和重定位时，它们就会分别被解析定位到`fake_init/fake_exit`上，从而导致假的入口/出口函数被执行。 
+
+
+
+### rootkit持久化
+
+根据上面的思路我们已经实现同模块入口出口劫持。这里，我们希望将一个模块的入口出口函数替换为另一个模块的入口出口函数。如果能够实现，我们就可以使用新的模块去替换`lib/modules/$(uname -r)/kernel/`下的某个开机加载模块，从而实现 rootkit 持久化。 
+
+为达到这个目的，有几个问题：
+
+- 感染/替换哪个系统模块？
+
+由于后面我们要进行测试，需要`rmmod`，所以最好找一个已加载但没有被使用的模块。我们可以在`lsmod`命令输出中找一个`Used`数为零的模块。后面将以`ac`模块为例。
+
+`ac`模块的路径是`/lib/modules/$(uname -r)/kernel/drivers/acpi/ac.ko`。
+
+- 怎样得知系统内核模块的入口/出口函数名？
+
+一方面，我们可以在`readelf -s ac.ko`中找长得像的；
+
+另一方面，我们可以在相应内核源码中找准确定义：
+
+在`drivers/acpi/ac.c`中搜索`module_init`：
+
+```
+module_init(acpi_ac_init);
+module_exit(acpi_ac_exit);
+```
+
+
+
+
+
+
+
 ### 隐藏模块
 
 主要隐藏的目标为：
@@ -231,6 +346,24 @@ unsigned long **get_syscalltable(void)
 }
 
 ```
+
+
+
+
+
+
+
+
+
+### ROOT提权后门
+
+**方案一**
+
+向特定文件写入指定内容，该文件可以使用文件隐藏隐藏起来
+
+**方案二**
+
+发送指定SIGNAL信号
 
 
 

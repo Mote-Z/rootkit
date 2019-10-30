@@ -1,0 +1,1 @@
+cmd_/home/mote/Desktop/rootkit/rootkit/learning/get_root/Give_root.ko := ld -r -m elf_x86_64 -z max-page-size=0x200000 -T ./scripts/module-common.lds --build-id  -o /home/mote/Desktop/rootkit/rootkit/learning/get_root/Give_root.ko /home/mote/Desktop/rootkit/rootkit/learning/get_root/Give_root.o /home/mote/Desktop/rootkit/rootkit/learning/get_root/Give_root.mod.o ;  true

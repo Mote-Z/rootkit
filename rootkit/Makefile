@@ -1,6 +1,6 @@
 TARGET = myrootkit
 obj-m := ${TARGET}ko.o
-${TARGET}ko-objs := ${TARGET}.o module_handler/module_handler.o zeroevil/zeroevil.o
+${TARGET}ko-objs := ${TARGET}.o motekit/motekit.o
 
 
 
