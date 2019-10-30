@@ -271,6 +271,26 @@ enable_wp(void)
 
 
 
+### 获取指定PID的Task
+
+```
+
+struct task_struct *
+find_task(pid_t pid)
+{
+	struct task_struct *p = current;
+	for_each_process(p) {
+		if (p->pid == pid)
+			return p;
+	}
+	return NULL;
+}
+```
+
+
+
+
+
 ### 获取sys_call_table地址
 
 #### 暴力搜索地址空间
