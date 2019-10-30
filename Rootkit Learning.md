@@ -452,11 +452,36 @@ int main(int argc, char *argv[]) {
 
  文件遍历主要通过是系统调用`getdents`和`getdents64`实现，它们的作用是获取目录项。 
 
+[参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00022.html)
 
 
 
 
 
+### 进程隐藏
+
+用户态获取进程信息只能通过/proc下的目录来获取
+
+因此结合文件隐藏，把/proc下名字与指定PID相同的文件夹隐藏即可
+
+[参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00023.html)
+
+[参考](https://github.com/m0nad/Diamorphine/blob/master/diamorphine.c)
+
+可以结合钩子kill来接收指定信号执行指定命令。
+
+
+
+### 端口隐藏
+
+ 用户态下隐藏端口信息，也是把`/proc/`下端口相关信息过滤掉。 
+
+| 网络类型 |   对应/proc    |    内核源码文件     | 主要实现函数  |
+| :------: | :------------: | :-----------------: | :-----------: |
+| TCP/IPv4 | /proc/net/tcp  | net/ipv4/tcp_ipv4.c | tcp4_seq_show |
+| TCP/IPv6 | /proc/net/tcp6 | net/ipv6/tcp_ipv6.c | tcp6_seq_show |
+| UDP/IPv4 | /proc/net/udp  |   net/ipv4/udp.c    | udp4_seq_show |
+| UDP/IPv6 | /proc/net/udp6 |   net/ipv6/udp.c    | udp6_seq_show |
 
 
 
