@@ -1,0 +1,1 @@
+cmd_/root/module_block/guard/module_block.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /root/module_block/guard/module_block.ko /root/module_block/guard/module_block.o /root/module_block/guard/module_block.mod.o
