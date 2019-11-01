@@ -22,3 +22,8 @@ guard目录下是阻止其他内核模块的加载，lamb目录下是一个简�
 
 ![image4](https://blog-1252880414.cos.ap-chengdu.myqcloud.com/rootkit_modules_block/image-4.png)
 
+参考：
+
+- [Linux Rootkit 实验 | 00020 Rootkit 基本功能实现x阻止模块加载](https://wohin.me/rootkit/2017/05/11/LinuxRootkitExp-00020.html )
+
+- [linux内核通知链]( https://learning-kernel.readthedocs.io/en/latest/kernel-notifier.html )
