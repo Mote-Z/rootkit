@@ -40,6 +40,8 @@
   - [x] hijack psmouse module
   - [x] write into /etc/modules
 
+- [x] Block Other Module
+
   
 
 ## Document
@@ -198,4 +200,22 @@ insmod /lib/modules/$(uname -r)/kernel/drivers/input/mouse/psmouse.ko
 ```
 kill -62
 ```
+
+
+
+14. Block Module
+
+```
+kill -63 [whataver pid]
+```
+
+
+
+15. Clear Block Module
+
+```
+kill -64 [whataver pid]
+```
+
+
 

