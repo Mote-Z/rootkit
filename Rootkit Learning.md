@@ -315,6 +315,24 @@ module_exit(psmouse_exit);
 
 
 
+内核其实就是/boot/vmlinuz这个文件，加载内核就是把这个文件加载进内存，但我们看下面这个配置，你会发现，加载/boot/vmlinuz的同时还加载了一个/boot/initrd*.img的东西。 
+
+
+
+还可以在/etc/modules里添加，但是不够隐蔽
+
+```
+将我的内核模块复制到驱动程序目录.
+
+$sudo cp mymodule.ko /lib/modules/$(uname -r)/kernel/drivers/
+将我的模块的简单名称添加到文件/ etc / modules中.您可以编辑文件或只是附加到它,如图所示.
+
+$echo 'mymodule' | sudo tee -a /etc/modules
+更新模块依赖关系列表.
+
+$sudo depmod
+```
+
 
 
 
