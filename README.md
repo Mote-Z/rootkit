@@ -619,7 +619,7 @@ void sysfs_remove_dir(struct kobject *kobj)
 
  写保护指的是写入只读内存时出错，可以通过CR0寄存器控制开启与否，修改从0开始的第16个Bit
 
-![image-20191028130225360](Rootkit Learning.assets/image-20191028130225360.png)
+![image-20191028130225360](README.assets/image-20191028130225360.png)
 
 可以使用`read_cr0`，`write_cr0`来读取和写入CR0寄存器
 
