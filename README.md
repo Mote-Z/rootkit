@@ -231,7 +231,7 @@ enum module_state
 2. 对/proc/modules隐藏
 3. 对/sys/module隐藏
 
-​	其中，lsmod是通过读取/proc/modules来发挥作用的，因此我们对/proc/modules进行处理就能解决前面两个目标，剩下的需要处理/sys/module/下的模块子目录。
+​	其中，lsmod是通过读取/proc/modules文件来发挥作用的，因此我们对/proc/modules进行处理就能解决前面两个目标，剩下的需要处理/sys/module/下的模块子目录。
 
 #### lsmod命令 与 /proc/modules文件
 
@@ -254,6 +254,8 @@ struct list_head {
 ```
 
 ​	把链表放入其他数据结构来进行管理，就像一根锁链把要管理的对象链在一起。
+
+![image-20191111205314625](README.assets/image-20191111205314625.png)
 
 >  list是作为一个列表的成员，所有的内核模块都被维护在一个全局链表中，链表头是一个全局变量struct module *modules。任何一个新创建的模块，都会被加入到这个链表的头部 
 
@@ -467,7 +469,15 @@ list_del_init(&__this_module.list);
 
 #### /sys/module目录的处理
 
+[参考文章](https://www.cnblogs.com/wwang/archive/2010/12/16/1902721.html)
+
+​	/sys/module目录下存放着当前加载的所有模块的信息，这些信息存放在kobject结构中，kobject可以看作是Linux设备模型的基础，一般内嵌在其他结构体来发挥作用。
+
 ​	对于/sys/module下的隐藏，如果不需要恢复的话，可以直接删除kobject，但是如果要恢复的话就需要操纵kobject的fd对象。[参考文章](https://github.com/croemheld/lkm-rootkit/blob/master/src/module_hiding.c )
+
+![image-20191112093435110](README.assets/image-20191112093435110.png)
+
+如果需要考虑恢复，要看kobject的源码
 
 ​	**struct module_kobject mkobj**
 
@@ -476,6 +486,10 @@ list_del_init(&__this_module.list);
 [参考文章2](http://kcmetercec.top/2018/03/09/linux_kernel_sysfs_tutorial/)
 
 [参考文章3](https://www.twblogs.net/a/5b8b2ccf2b717718832dd8f0/zh-cn)
+
+[参考文章4](https://www.win.tue.nl/~aeb/linux/lk/lk-13.html)
+
+[参考文章5](http://dandylife.net/blog/archives/304)
 
 ```
 //include/linux/module.h
@@ -496,7 +510,7 @@ struct kobject {
     struct kobject      *parent;  //指向当前kobject父对象的指针，体现在sys结构中就是包含当前kobject对象的目录对象
     struct kset         *kset;    //表示当前kobject对象所属的集合
     struct kobj_type    *ktype;   //表示当前kobject的类型
-    struct kernfs_node  *sd;     //表示VFS文件系统的目录项
+    struct kernfs_node  *sd;     //表示sysfs文件系统的目录项
     struct kref         kref;   // 对kobject的引用计数，当引用计数为0时，就回调之前注册的release方法释放该对象
     #ifdef CONFIG_DEBUG_KOBJECT_RELEASE  
     	struct delayed_work release;
